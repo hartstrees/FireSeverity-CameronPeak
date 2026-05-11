@@ -1,0 +1,240 @@
+---
+title: "Spatial patterns of fire severity and bark beetle outbreak in the Cameron Peak Fire"
+author: "Sarah Hart"
+contact: "sarah.hart@colostate.edu"
+date: "2026-05-11"
+output: 
+  bookdown::html_document2:
+    code_folding: hide
+    toc: TRUE
+    toc_depth: 4
+    toc_float: TRUE
+    collapsed: FALSE
+    theme: spacelab
+    fig_caption: TRUE
+    number_sections: FALSE
+link-citations: true
+csl: global-change-biology.csl
+bibliography: references.bib
+---
+
+```{r setup, echo=T, results=T, message=F, warning=TRUE, progress=FALSE}
+knitr::opts_chunk$set(
+	echo = T,
+	fig.align = "center",
+	fig.height = 4,
+	fig.width = 7,
+	out.width= "504pt",
+	message = FALSE,
+	warning = FALSE,
+	dpi = 300,
+	progress = FALSE,
+	cache = TRUE
+)
+
+### Import libraries
+if (!require("remotes"))  install.packages("remotes")
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  here, # easy file structure
+  tidyverse, # data manipulation
+  ggplot2, # figures
+  RColorBrewer, # color palettes
+  patchwork, # combining figures
+  sf, # spatial data
+  terra # raster data 
+) 
+
+
+# Set seed
+set.seed(2020)
+
+# Set custom plotting theme
+theme_new <- function(base_size = 9,base_family = "Helvetica"){
+  theme_classic(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      axis.line.x = element_line(color="black", linewidth = 0.25),
+      axis.line.y = element_line(color="black", linewidth = 0.25),
+      axis.title = element_text(size = 9),
+      axis.text = element_text(colour="black", size=8),
+      legend.key=element_rect(colour=NA, fill =NA),
+      panel.grid = element_blank(),   
+      plot.background = element_rect(fill = NA, colour = NA),
+      panel.border = element_rect(fill = NA, colour = NA),
+      panel.background = element_rect(fill = "white", colour = "black"), 
+      strip.background = element_rect(fill = "white"),
+      strip.text = element_text(size = 9)
+      
+    )
+}
+theme_set(theme_new())
+options(ggplot2.continuous.colour="viridis")
+terraOptions(progress=0)
+```
+
+```{r create directories if they do not exist}
+dir.create(here("Spatial/"), showWarnings = FALSE)
+dir.create(here("Spatial/Raw"), showWarnings = FALSE)
+dir.create(here("Spatial/Processed"), showWarnings = FALSE)
+```
+
+# Overview
+
+This code compares the patterns of overlap between mortality of lodgepole pine (*Pinus contorta*) attributed to the mountain pine beetle (*Dendroctonus ponderosae)* and subsequent fire severity in the Cameron Peak Fire, which burned in 2020 in northwestern Colorado.
+
+# Data
+
+## Basic Geographic data
+
+We obtained spatial data describing state boundaries from the [@u.s.censusbureau2019].
+
+```{r DL_States}
+## Download states (if not already downloaded)
+if(!dir.exists(here("Data", "Spatial", "Raw", "States"))){
+  dir.create(here("Data", "Spatial", "Raw", "States"), showWarnings = FALSE)
+  temp <- here("Data", "Spatial", "Raw", "States", "cb_2018_us_state_20m.zip")
+  download.file("https://www2.census.gov/geo/tiger/GENZ2018/shp/cb_2018_us_state_20m.zip", temp, mode="wb")
+  unzip(temp, exdir=here("Data", "Spatial", "Raw", "States"))
+  file.remove(temp)
+}
+```
+
+```{r DL_ecoregions}
+# Download Ecoregion data
+dir.create(here("Data", "Spatial", "Raw", "Ecoregions"), showWarnings = FALSE)
+temp <- here("Data", "Spatial", "Raw", "Ecoregions","us_eco_l3.zip")
+if(!file.exists(temp)){
+download.file("https://dmap-prod-oms-edc.s3.us-east-1.amazonaws.com/ORD/Ecoregions/us/us_eco_l3.zip", temp, mode="wb")
+  unzip(temp, exdir=here("Data", "Spatial","Raw",  "Ecoregions"))
+}
+```
+
+## Wildfire
+
+### Wildfire perimeters
+
+We acquired polygon data describing the extent of the area burned in the Cameron Peak fire from the Monitoring Trends in Burn Severity (MTBS) Project [-@mtbsproject2024].
+
+```{r DL_MTBS}
+## MTBS perimeters (if not already downloaded)
+# Note downloading here from the USFS FSGeodata Clearinghouse because the MTBS website kept throwing errors when downloading data programmatically
+if(!dir.exists(here("Data", "Spatial", "Raw", "Fire", "MTBS"))){
+  dir.create(here("Data", "Spatial", "Raw", "Fire"), showWarnings = FALSE)
+  dir.create(here("Data", "Spatial", "Raw", "Fire", "MTBS"), showWarnings = FALSE)
+  temp <- here("Data", "Spatial", "Raw", "Fire", "MTBS", "mtbs_perimeter_data.zip")
+  download.file("https://data.fs.usda.gov/geodata/edw/edw_resources/shp/S_USA.MTBS_BURN_AREA_BOUNDARY.zip", temp, mode="wb")
+  unzip(temp, exdir=here("Data", "Spatial", "Raw", "Fire","MTBS"))
+ file.remove(temp)
+}
+```
+
+### Fire severity
+
+As an estimate of fire severity we calculated the composite burn index (CBI) from Landsat multispectral imagery in Google Earth Engine using methods outlined by Parks et al. [-@parks2019]. Briefly CBI is modeled as function of four remotely sensed indices, the relativized burn ratio (RBR) [@parks2014], delta mid-infrared bi-spectral index (dMIRBI) [@mccarley2018], post-fire mid-infrared bi-spectral index (pMIRIBI) [\@mccarley2018], and delta normalized differenced vegetation index (dNDVI) [@pettorelli2005] and climatic water deficit (CWD), and latitude. RBR is calculated as follows:
+
+$$ RBR =  \frac{dNBR}{NBR_{prefire}-0.001} $$
+
+where NBR is the difference between near infrared (NIR) band and shortwave infrared (SWIR1) band divided by their sum and dNBR is the difference between prefire and postfire NBR. The mid-infrared bi-spectral index (MIRBI) is calculated from the SWIR1 and SWIR2:
+
+$$ MIRBI = (10\times \rho_{SWIR1}) - (9.8\times\rho_{SWIR2})+2$$
+
+$$dMIRBI = (MIRBI_{prefire} - MIRBI_{postfire})$$
+
+and dMIRBI is the difference between prefire and postfire MIRBI. Finally, dNDVI is the difference between the pre- and post-fire normalized differenced vegetation index (NDVI), which is calculated as the difference between the NIR and red bands divided by their sum. Because the model over predicts CBI at low values, so we used Parks et al.'s [-@parks2019] bias correction, which is calculated as follows:
+
+$$CBI_{bc} = \begin{cases} \ (CBI_{pred}-1.5)\times 1.3) + 1.5, & \ CBI_{pred}≤1.5\\ \ (CBI_{pred}-1.5)\times 1.715) + 1.5, & \ CBI_{pred}>1.5 \end{cases}$$
+
+We then classified the resulting CBI scores into four burn severity levels, unburned (CBI: 0–0.1), low severity (CBI: 0.1–1.24), moderate severity (CBI: 1.25–2.24), and high severity (CBI: 2.25–3), following Key and Benson [-@key1999].
+
+```{r prepGEECBI}
+## Prepares fires perimeter dataset for use in Sean Parks' GEE code for calculating fire severity
+dir.create(here("Data", "Spatial", "Processed", "GEE"))
+dir.create(here("Data", "Spatial", "Processed", "GEE", "FirePerimeters"))
+st_read(here('Data/Spatial/Raw/Fire/MTBS/S_USA.MTBS_BURN_AREA_BOUNDARY.shp'), quiet = TRUE) %>% 
+  filter(YEAR==2020) %>% 
+  filter(FIRE_NAME=="CAMERON PEAK") %>% 
+  mutate(date=as.Date(as.character(IG_DATE), format="%Y%m%d")) %>% # conver ignition date to date object
+  mutate(Start_Day=lubridate::yday(date)-14) %>% # set first possible date 
+  mutate(End_Day=max(lubridate::yday(date))+30) %>% # set last possible date 
+  mutate(Fire_Year=YEAR, Fire_ID=FIRE_ID) %>% # create variables with column names used in Parks code
+  select(Fire_ID, Fire_Year, Start_Day, End_Day) %>% # include only Fire ID, Fire Year, Start Day and End Day columns in dataset
+  mutate(Start_Day=ifelse(Start_Day<1, 1, Start_Day), End_Day=ifelse(End_Day>365, 365, End_Day)) %>% 
+  st_write(here("Data", "Spatial", "Processed", "GEE", "FirePerimeters", paste0("CameronPeak.shp")), delete_dsn = TRUE, quiet = TRUE)
+```
+
+## Bark beetle outbreaks
+
+We acquired 30 x 30 m raster data describing the cumulative extent of bark beetle-attributed tree mortality for the 1997-2019 period produced by Rodman et al. [-@rodman2021EffectsBarkBeetle]. Because Rodman et al.'s [-@rodman2021EffectsBarkBeetle] data does not distinguish among damaged caused by the MPB to lodgepole pine, the spruce beetle (*Dendroctonus rufipennis*) to Englemann spruce (*Picea engelmannii),* or the western balsam bark beetle (*Dryocoetes confusus*) to subalpine fir (*Abies lasiocarpa*), we obtained data on the distribution of lodgepole pine prior to outbreak. Specifically, a obtained 240 x 240 m map of the basal area of lodgepole pine in ca. 2002 from the National Insect and Disease Risk Mapping project [@usfs2019NationalIndividualTree]. We then listed lodgepole as present in any cell where the basal area of lodgepole pine was least 10 m^2^/ha and masked the maps of bark beetle outbreak to only areas where lodgepole was present prior to outbreak [@chapman2012SpatiotemporalPatternsMountain; @tutland2023OverlappingOutbreaksMultiple].
+
+# Analyses
+
+We used a simple overlay analyses to characterize patterns of overlap between fire severity and prior mountain pine beetle outbreak across the Cameron Peak burn scar. Specifically, overlaid maps of classified fire severity with maps of the presence or absence of MPB outbreak in lodgepole pine forests and generated a contingency table comparing the frequency of overlap.
+
+```{r overlay}
+terraOptions(progress=0)
+dir.create(here("Results/Figures"))
+# Import extent of Cameron Peak fire
+CameronPeak <- st_read(here("Data", "Spatial", "Processed", "Fire", "GEE", "FirePerimeters", paste0("CameronPeak.shp")), quiet=T)
+
+# Import lodgepole 
+lpp <- rast(here("Data/Spatial/Raw/ITSPM/b108.tif"))
+lpp[lpp<10] <- NA
+lpp[lpp>0]<- 1
+dir.create(here("Data", "Spatial", "Processed", "ITSPM"), showWarnings = FALSE)
+writeRaster(filename=here("Data/Spatial/Processed/ITSPM/lpp.tif"), lpp, overwrite=T)
+  
+# Convert lodgepole pine raster to polygon 
+lpp.poly <- lpp %>% 
+  crop(st_transform(CameronPeak, st_crs(lpp))) %>% 
+  mask(st_transform(CameronPeak, st_crs(lpp))) %>% 
+  as.polygons()  %>% 
+  st_as_sf() %>% 
+  filter(b108==1)
+  
+lpp.poly %>%  st_write(here("Data", "Spatial", "Processed", "ITSPM", "lpp_poly.gpkg"), delete_dsn=T, quiet = TRUE)
+
+# Convert area affected by bark beetle to raster
+bb <- rast(here("Data/Spatial/Raw/BarkBeetle/doi_10_5061_dryad_1rn8pk0sn__v20210307/Rodman et al. RS_DataArchive/Data/SpatialData/BBPresence_finalMasked.tif"))
+bb.poly <- bb %>% 
+  crop(st_transform(CameronPeak, st_crs(bb))) %>% 
+  mask(st_transform(CameronPeak, st_crs(bb))) %>% 
+  mask(st_transform(lpp.poly, st_crs(bb))) %>% 
+  as.polygons()  %>% 
+  st_as_sf() %>%   filter(BBPresence_finalMasked==1)
+
+ bb.poly %>% st_write(here("Data", "Spatial", "Processed", "bb_poly.gpkg"), delete_dsn=T, quiet = TRUE)
+
+lpp.poly.affected <- lpp.poly %>% st_intersection(bb.poly) %>% st_make_valid() 
+lpp.poly.affected %>%  st_write(here("Data", "Spatial", "Processed", "ITSPM", "lpp_poly1.gpkg"), delete_dsn=T, quiet = TRUE)
+ 
+lpp.poly.unaffected <- lpp.poly %>% st_difference(bb.poly) %>% st_make_valid() 
+lpp.poly.unaffected %>%  st_write(here("Data", "Spatial", "Processed", "ITSPM", "lpp_poly0.gpkg"), delete_dsn=T, quiet = TRUE)
+
+
+# Import fire severity
+
+cp <- rast(here("Data", "Spatial", "Processed", "Fire", "GEE", "CBI", "CO4060910587920200813_CBI_bc.tif"))
+
+reclass_matrix <- matrix(c(
+    0, 0.1, 0,
+    0.1, 1.25, 1,
+    1.25, 2.25, 2,
+    2.25, 3, 3), ncol=3, byrow=TRUE)
+
+  cp.class <- classify(cp, reclass_matrix, right=F)
+  
+cp.class1 <- cp.class %>% mask(st_transform(lpp.poly.affected, st_crs(cp.class)))
+cp.class1 %>% writeRaster(here("Data", "Spatial", "Processed", "cp_class1.tif"), overwrite=T)
+cp.class0 <- cp.class %>% mask(st_transform(lpp.poly.unaffected, st_crs(cp.class)))
+cp.class0 %>% writeRaster(here("Data", "Spatial", "Processed", "cp_class0.tif"), overwrite=T)
+  
+  x <- cp.class1 %>% st_drop_geometry() %>% as.data.frame() %>% mutate(variable="affected")
+  y <- cp.class0 %>% st_drop_geometry() %>% as.data.frame() %>% mutate(variable="unaffected")
+  xy <- bind_rows(x,y) %>% filter(CBI_bc>0) %>% group_by(variable, CBI_bc) %>% summarise(n=n()) %>% group_by(variable) %>% mutate(prop=n/sum(n)) %>% unite(col="fill", variable:CBI_bc, sep="_", remove=F) %>% mutate(CBI_bc=factor(CBI_bc, levels=c(1,2,3), labels=c("low", "moderate", "high")))
+  p1 <- xy %>% ggplot(aes(x=CBI_bc, y=prop, fill=fill)) + geom_bar(stat="identity", position="dodge") + scale_fill_manual(values=c("affected_1"="#1f78b4", "affected_2"="#ff7f00", "affected_3"="#e31a1c", "unaffected_1"="#a6cee3", "unaffected_2"="#fdbf6f", "unaffected_3"="#fb9a99"), labels=c("MPB & low CBI", "MPB & mod. CBI", "MPB & high CBI", "No MPB & low CBI", "No MPB & mod. CBI", "No MPB & high CBI")) + labs(x="composite burn index", y="Proportion of pixels") + theme(legend.title=element_blank(), legend.position=c(0.3, 0.82))+ theme(legend.text=element_text(size=7), axis.title=element_text(size=8), axis.text = element_text(size=7))+
+  theme(legend.key.size = unit(0.25, 'cm')) 
+  ggsave(p1, filename=here("Results/Figures/fig1.jpg"), width=2.5, height=2.55, units="in", dpi=900)
+
+```
+
+# References
